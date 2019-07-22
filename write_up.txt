@@ -1,0 +1,52 @@
+Yêu cầu : lên shell
+Ý tưởng: vì không có hàm nào giúp gọi flag nên ý tưởng là lên bằng shellcode hoặc ret2libc
+ - với shellcode, vì không xác định được địa chỉ Stack( PIE )  và stack không được quyền excute cũng như chỉ có thể ghi vào buffer nên chọn ret2libc
+ - sửa địa chỉ return của main thành địa chỉ hàm system
+Thực hiện: 
+ - Lợi dụng lỗi format string trong hàm exploit_me, ta leak các địa chỉ ebp, địa chỉ stack tại ví trí 9th so với BUFF
+ - Ta thấy chương trình chỉ cho read() 3 lần , nhưng ta lại cần nhiều hơn 3 lần read()  cho nên đầu tiên cần sửa đổi giá trị của biến đêm tại [ebp - 0xc]
+ thành giá trị âm, ví dụ như -1000, thì ta có thể read() > 1000 lần
+	+ Thực hiện: 
+		Muốn thay đổi giá trị ở 1 vị trí nào đó bằng format string thì ta địa chỉ chứa giá trị đó, nhưng ta lại không thấy bất kì 1 địa chỉ nào
+		trỏ tới giá trị đếm tại [ebp - 0xc] 
+		Chú ý: ở ô stack thứ 9 so với BUFF, trỏ tới 1 địa chỉ, và địa chỉ trỏ tới 1 địa chỉ khác: add[9th] -> add[57th] -> add[?] -> <number> 
+		Ta có thể dùng fmt để sửa giá trị địa chỉ trỏ tới bới add[57th] thành trỏ tới [ebp - 0xc], và sau đó đến ô stack 57th để thay đổi
+		giá trị của biến đếm
+		[9th](cũ)        add[9] -> add[57] -> add[?] -> <number> 
+		[9th](mới sửa)   add[9] -> add[57] -> add[ebp-0xc](cái bị sửa) -> <biến đếm>
+		...
+		...
+		[57th]           add[57] -> add[ebp - 0xc] -> <biến đếm>(cái bị sửa)
+		- Để ghi được giá trị âm, có dạng 0xff00000x, thì ta cần ghi 0xff vào byte cao nhất của địa chỉ biến đếm, vậy ta sẽ sửa thành add[ebp-0xc+3]
+		[9th](cũ)        add[9] -> add[57] -> add[?] -> <number> 
+		[9th](mới sửa)   add[9] -> add[57] -> add[ebp-0xc+3](cái bị sửa) -> <biến đếm>
+		...
+		...
+		[57th]           add[57] -> add[ebp - 0xc+3] -> <biến đếm>(cái bị sửa)
+		payload = '%' + str((ebp-0xc+3)^0xffff0000) +'x%9$hn'
+		Sau khi sửa ,địa chỉ add[9th] -> add[57th] -> add[ebp-0xc+3] -> ....
+		Ta tiếp tục việc đưa 0xff vào địa chỉ byte cao nhất của biến đếm	
+		payload = '%' + str(0xff) + 'x%57$hhn'
+ - Sau khi xong việc thay đổi giá trị biến đếm thành âm, chương trình cho chúng ta ghi rất nhiều lần
+ - Việc tiếp theo là leak địa chỉ libc của system và /bin/sh 
+	+ Thực hiện:
+		Ta thấy địa chỉ 15th trong stack mang giá trị của _start_libc_main+247 nằm trong libc
+		Ta tìm địa chỉ system và /bin/sh trong lần chạy để lấy offset
+		Ta có:
+		offset_system = 0x22769 # system - libc_start
+		offset_binsh = 0x1433d4 # binsh - libc_start
+		=> Vậy ta chỉ cần leak được địa chỉ này là có thể gọi được system, /bin/sh và địa chỉ này luôn nằm trên stack vì đó là địa chỉ trả về của main
+ - Tiếp theo , ta cần ghi địa chỉ system và /bin/sh theo thứ tự [system] + [4 bytes] + [/bin/sh] vào stack
+	+ Thực hiện: 
+		Để ghi địa chỉ, ta có 4 bytes địa chỉ nhưng không thể ghi hết 1 lần, ta chia thành 2 lần ghi, mỗi lần 2 bytes [low bytes and high bytes]
+		Ta lợi dụng địa chỉ 9th và 10th trong stack để phân biệt ghi.
+		add[9]  -> add[57] -> add[return] (ghi 2 bytes thấp) 
+		add[10] -> add[59] -> add[return+2] (ghi 2 bytes cao)
+		Lợi dụng điều này để ghi địa chỉ system và /bin/sh vào stack
+Done !
+Trick:
+- Có 1 số trường hợp bị tràn kí tự '\n' của payload, ta dùng interactive() và ctr+c để nhận \n
+- 	def high(address):
+		return (address ^ 0xffff) >> 16
+	def low(address):
+		return (address&0xffff)
